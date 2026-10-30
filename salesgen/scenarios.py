@@ -228,9 +228,9 @@ Today you are offering: {{{{product}}}} for {{{{price}}}} ({{{{term}}}}). The cu
 Be natural and polite. Introduce the offer, ask about the customer's needs, handle objections once or twice,
 and if the customer hesitates, ask what is holding them back (you may guess it is the price). Do not push after
 a clear no. Close the call politely when the customer has decided or wants to end it. Keep turns short, as on
-the phone."""
+the phone. Write plain spoken text only, without bracketed tags such as [happy] or [slow]."""
 
-SELLER_FIRST_MESSAGE = {"pl": "Dzień dobry, z tej strony Ola. Czy rozmawiam z panią lub panem {{customer_name}}?",
+SELLER_FIRST_MESSAGE = {"pl": "Dzień dobry, z tej strony Ola. Czy to pani lub pan {{customer_name}}?",
                         "en": "Hello, this is Ola calling. Am I speaking with {{customer_name}}?"}
 
 

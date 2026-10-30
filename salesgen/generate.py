@@ -17,6 +17,7 @@ import collections
 import hashlib
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -165,6 +166,12 @@ Q = {
 }
 
 
+def clean(text: str) -> str:
+    """Drops the voice-expression tags ElevenLabs agents put in their text ("[happy]", "[slow]")."""
+
+    return re.sub(r"\s{2,}", " ", re.sub(r"\[[a-z][a-z ]{0,20}\]\s*", "", text)).strip()
+
+
 def cmd_build(args) -> None:
     run = Path(args.run)
     plan = {c["call_id"]: c for c in read_jsonl(run / "plan.jsonl")}
@@ -188,8 +195,8 @@ def cmd_build(args) -> None:
         sessions.append({"session_id": sid[call["call_id"]], "date": call["date"],
                          "meta": {"call_id": call["call_id"], "customer_id": call["customer_id"],
                                   "customer_name": call["customer_name"], "product_id": call["product_id"]},
-                         "turns": [{"turn_id": opaque("t_", sid[call["call_id"]], str(i)), **turn}
-                                   for i, turn in enumerate(t["turns"])]})
+                         "turns": [{"turn_id": opaque("t_", sid[call["call_id"]], str(i)), "role": turn["role"],
+                                    "content": clean(turn["content"])} for i, turn in enumerate(t["turns"])]})
         calls_gold.append({"session_id": sid[call["call_id"]], **{k: call[k] for k in (
             "call_id", "customer_id", "customer_name", "product_id", "pattern", "outcome", "primary_reason",
             "secondary_reason", "primary_detail", "secondary_detail", "prior_call")}, "simulation_status": t.get("status")})
