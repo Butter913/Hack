@@ -41,8 +41,13 @@ def opaque(prefix: str, *parts: str) -> str:
 # ---- plan ---------------------------------------------------------------------------------------------------
 
 def cmd_plan(args) -> None:
-    calls = sc.plan_campaign(args.calls, lang=args.lang, seed=args.seed, start=args.start, days=args.days)
     run = Path(args.run)
+    if (run / "transcripts.jsonl").exists() and not args.force:
+        sys.exit(f"{run} already has simulated calls, which a new plan would not match: use another --run "
+                 f"(or --force to replan and start the transcripts over)")
+    if args.force:
+        (run / "transcripts.jsonl").unlink(missing_ok=True)
+    calls = sc.plan_campaign(args.calls, lang=args.lang, seed=args.seed, start=args.start, days=args.days)
     write_jsonl(run / "plan.jsonl", calls)
     (run / "config.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
     patterns = collections.Counter(c["pattern"] for c in calls)
@@ -76,11 +81,17 @@ def cmd_simulate(args) -> None:
     api = ElevenLabs()
     state_path = run / "state.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
-    if not state.get("agent_id"):
-        state["agent_id"] = args.agent_id or api.create_agent(
-            name=f"salesgen seller ({lang})", prompt=sc.SELLER_PROMPT.format(language=sc.LANGS[lang]),
-            first_message=sc.SELLER_FIRST_MESSAGE[lang], language=lang, llm=args.agent_llm,
-            placeholders={"customer_name": "Jan Kowalski", "product": "oferta", "price": "100 zł", "term": "rok"})
+    prompt = sc.SELLER_PROMPT.format(language=sc.LANGS[lang])
+    version = opaque("", prompt, sc.SELLER_FIRST_MESSAGE[lang])
+    if args.agent_id:
+        state.update(agent_id=args.agent_id, agent_version=version)
+    if state.get("agent_version") != version:  # no agent yet, or one made from an older prompt
+        state["agent_id"] = api.create_agent(
+            name=f"salesgen seller ({lang})", prompt=prompt, first_message=sc.SELLER_FIRST_MESSAGE[lang],
+            language=lang, llm=args.agent_llm,
+            placeholders={"customer_name": "Jan Kowalski", "product": "oferta", "price": "100 zł", "term": "rok",
+                          "seller_style": sc.GOOD_SELLER})
+        state["agent_version"] = version
         state_path.write_text(json.dumps(state, indent=2))
         print("seller agent:", state["agent_id"])
 
@@ -92,7 +103,8 @@ def cmd_simulate(args) -> None:
                 tests[api.create_simulation_test(
                     name=f"salesgen {call['call_id']}", scenario=sc.scenario_prompt(call),
                     conditions=sc.success_conditions(call), max_turns=args.max_turns, user_llm=args.user_llm,
-                    dynamic_variables={k: call[k] for k in ("customer_name", "product", "price", "term")})] = call
+                    dynamic_variables={**{k: call[k] for k in ("customer_name", "product", "price", "term")},
+                                       "seller_style": sc.seller_style(call)})] = call
             inv = api.wait_invocation(api.run_tests(state["agent_id"], list(tests), f"salesgen batch {i}"),
                                       timeout=args.timeout)
         except ElevenLabsError as e:
@@ -133,9 +145,10 @@ def mock_transcript(call: dict) -> dict:
         turns.append(("assistant", "Czy chodzi o cenę?" if pl else "Is it the price?"))
         turns.append(("user", "Nie, cena jest w porządku." if pl else "No, the price is fine."))
     if call["primary_detail"]:
-        turns.append(("user", f"[{call['primary_reason']}] {call['primary_detail']}."))
+        turns.append(("assistant" if call["fault"] == "seller" else "user",
+                      f"({call['primary_reason']}) {call['primary_detail']}"))
     if call["secondary_detail"]:
-        turns.append(("user", f"[{call['secondary_reason']}] {call['secondary_detail']}."))
+        turns.append(("user", f"({call['secondary_reason']}) {call['secondary_detail']}."))
     end = {"sale": "Dobrze, biorę." if pl else "OK, I'll take it.",
            "follow_up": "Proszę zadzwonić w przyszłym miesiącu." if pl else "Call me next month.",
            "no_sale": "Muszę to przemyśleć." if pl else "I need to think about it."}[call["outcome"]]
@@ -153,6 +166,8 @@ Q = {
         "agg": "Jaki jest najczęstszy powód, dla którego klienci nie kupili oferowanego produktu lub usługi?",
         "agg_product": "Jaki jest najczęstszy powód odmowy zakupu oferty „{product}”?",
         "count": "Ilu klientów odmówiło zakupu głównie z powodu: {label}?",
+        "seller_top": "Jaki błąd sprzedawcy najczęściej powodował, że rozmowa nie kończyła się sprzedażą?",
+        "fault_split": "W ilu nieudanych rozmowach winny był sprzedawca, a w ilu powód leżał po stronie klienta?",
         "why": "Dlaczego {name} nie {verb} oferty „{product}”?",
         "why_now": "Jaki jest najbardziej aktualny powód, dla którego {name} nie {verb} oferty „{product}”?",
     },
@@ -160,6 +175,8 @@ Q = {
         "agg": "What is the most common reason customers did not buy the product or service they were offered?",
         "agg_product": "What is the most common reason customers declined the \"{product}\" offer?",
         "count": "How many customers declined mainly because of: {label}?",
+        "seller_top": "Which salesperson mistake most often cost the sale?",
+        "fault_split": "In how many failed calls was the salesperson at fault, and in how many was the reason on the customer's side?",
         "why": "Why didn't {name} buy the \"{product}\" offer?",
         "why_now": "What is the latest reason {name} gave for not buying the \"{product}\" offer?",
     },
@@ -198,7 +215,7 @@ def cmd_build(args) -> None:
                          "turns": [{"turn_id": opaque("t_", sid[call["call_id"]], str(i)), "role": turn["role"],
                                     "content": clean(turn["content"])} for i, turn in enumerate(t["turns"])]})
         calls_gold.append({"session_id": sid[call["call_id"]], **{k: call[k] for k in (
-            "call_id", "customer_id", "customer_name", "product_id", "pattern", "outcome", "primary_reason",
+            "call_id", "customer_id", "customer_name", "product_id", "pattern", "outcome", "fault", "primary_reason",
             "secondary_reason", "primary_detail", "secondary_detail", "prior_call")}, "simulation_status": t.get("status")})
 
     questions, gold = [], []
@@ -212,7 +229,7 @@ def cmd_build(args) -> None:
         gold.append({"question_id": qid, "question_type": qtype, "abstain": abstain, "answer": answer,
                      "aliases": list(aliases), "evidence": evidence if not abstain else []})
 
-    label = lambda r: sc.REASONS[r]["label"][lang]
+    label = lambda r: sc.label(r, lang)
     # Aggregates count customers, each by their latest call: a customer declined twice counts once, with the
     # latest reason; the evidence is every call of theirs that gave that reason.
     per_customer = collections.defaultdict(list)
@@ -228,7 +245,7 @@ def cmd_build(args) -> None:
         (top, n_top), *_ = n_customers.most_common()
         dist = ", ".join(f"{label(r)}: {n}" for r, n in n_customers.most_common())
         add("aggregate", T["agg"], f"{label(top)} ({n_top}/{len(declined)}; {dist})", by_reason[top],
-            aliases=[label(top), sc.REASONS[top]["label"]["en"]])
+            aliases=[label(top), sc.label(top, "en")])
         for r, ids in by_reason.items():
             add("aggregate-count", T["count"].format(label=label(r)), str(n_customers[r]), ids)
         for pid in sorted({c["product_id"] for c in declined}):
@@ -238,7 +255,17 @@ def cmd_build(args) -> None:
                 product = next(c["product"] for c in declined if c["product_id"] == pid)
                 add("aggregate-product", T["agg_product"].format(product=product), label(r),
                     [sid[c["call_id"]] for c in declined if c["product_id"] == pid and c["primary_reason"] == r],
-                    aliases=[sc.REASONS[r]["label"]["en"]])
+                    aliases=[sc.label(r, "en")])
+    seller = collections.Counter(c["primary_reason"] for c in declined if c["fault"] == "seller")
+    if seller:
+        (top, n_top), *_ = seller.most_common()
+        add("aggregate-seller", T["seller_top"], f"{label(top)} ({n_top}/{sum(seller.values())})", by_reason[top],
+            aliases=[label(top), sc.label(top, "en")])
+        n_cust = len(declined) - sum(seller.values())
+        add("aggregate-fault", T["fault_split"],
+            (f"sprzedawca: {sum(seller.values())}, klient: {n_cust}" if lang == "pl" else
+             f"salesperson: {sum(seller.values())}, customer: {n_cust}"),
+            [sid[c["call_id"]] for c in declined if c["fault"] == "seller"])
 
     def verb(name):
         return ("kupiła" if sc.is_female(name, lang) else "kupił") if lang == "pl" else ""
@@ -252,11 +279,14 @@ def cmd_build(args) -> None:
             updated.append(cs)
         if all(c["outcome"] == "sale" for c in cs):
             bought.append(last)
-    for c in rng.sample(single, min(args.per_type, len(single))):
-        add(f"customer-reason/{c['pattern']}",
-            T["why"].format(name=c["customer_name"], verb=verb(c["customer_name"]), product=c["product"]),
-            f"{label(c['primary_reason'])}: {c['primary_detail']}", [sid[c["call_id"]]],
-            aliases=[label(c["primary_reason"])])
+    for fault, qtype in (("customer", "customer-reason/{pattern}"), ("seller", "seller-fault/{primary_reason}")):
+        pool = [c for c in single if c["fault"] == fault]
+        for c in rng.sample(pool, min(args.per_type, len(pool))):
+            prefix = ("błąd sprzedawcy - " if lang == "pl" else "salesperson's mistake - ") if fault == "seller" else ""
+            add(qtype.format(**c),
+                T["why"].format(name=c["customer_name"], verb=verb(c["customer_name"]), product=c["product"]),
+                f"{prefix}{label(c['primary_reason'])}: {c['primary_detail']}", [sid[c["call_id"]]],
+                aliases=[label(c["primary_reason"])])
     for cs in rng.sample(updated, min(args.per_type, len(updated))):
         c = cs[-1]
         add("knowledge-update",
@@ -317,6 +347,7 @@ def main() -> None:
     a.add_argument("--seed", type=int, default=0)
     a.add_argument("--start", default="2026-09-01", help="first possible call date (YYYY-MM-DD)")
     a.add_argument("--days", type=int, default=60, help="length of the campaign in days")
+    a.add_argument("--force", action="store_true", help="replan a run that has transcripts (deletes them)")
 
     a = sub.add_parser("simulate", help="run the planned calls as ElevenLabs simulations")
     a.add_argument("--run", required=True)

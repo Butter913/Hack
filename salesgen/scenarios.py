@@ -85,6 +85,70 @@ REASONS = {
 DEFAULT_REASON_WEIGHTS = {"price": 0.32, "timing": 0.20, "competitor": 0.16, "trust": 0.14, "missing_feature": 0.10,
                           "no_need": 0.08}
 
+# Sales the salesperson lost: the customer was open to buying, and a mistake in the call lost it. `seller` is the
+# per-call instruction the seller agent gets (as the {{seller_style}} dynamic variable); `customer` is how the
+# simulated customer reacts; `shows` is what the transcript must show, checked by ElevenLabs after the call.
+SELLER_MISTAKES = {
+    "pushy": {
+        "label": {"pl": "nachalny sprzedawca", "en": "pushy salesperson"},
+        "seller": "Be pushy: when the customer hesitates or says no, ignore it, repeat the offer, insist it is a "
+                  "one-time chance and press for a decision now.",
+        "customer": "You were mildly interested, but pressure annoys you. If the salesperson keeps pushing after you "
+                    "hesitate, say clearly that you don't like being pressured and end the call.",
+        "shows": "The salesperson keeps pressing after the customer hesitates, and the customer objects to the "
+                 "pressure.",
+    },
+    "no_discovery": {
+        "label": {"pl": "brak rozpoznania potrzeb", "en": "no needs discovery"},
+        "seller": "Do not ask the customer any questions about their situation or needs. Pitch the standard offer "
+                  "and its features straight away and keep to it.",
+        "customer": "Your situation makes the standard offer a poor fit (invent a concrete reason, e.g. you live "
+                    "alone, rent, or run a two-person business). Mention it once in passing; if the salesperson "
+                    "ignores it and keeps pitching the standard offer, say it is not for you.",
+        "shows": "The salesperson never asks about the customer's needs and keeps pitching an offer that does not "
+                 "fit what the customer said about their situation.",
+    },
+    "objection_dismissed": {
+        "label": {"pl": "zbyta obiekcja", "en": "objection brushed off"},
+        "seller": "When the customer raises a concern or asks a specific question, brush it off with a vague "
+                  "reassurance ('don't worry, it's all fine') and move on to the pitch without answering it.",
+        "customer": "You are close to buying but have one concrete, answerable question (e.g. whether you can "
+                    "cancel early, or how soon it starts). If it is not answered concretely, you decline because "
+                    "your question was dodged.",
+        "shows": "The customer asks a specific question or raises a concern, and the salesperson does not answer "
+                 "it concretely.",
+    },
+    "wrong_info": {
+        "label": {"pl": "sprzeczne informacje", "en": "contradictory information"},
+        "seller": "Get the terms muddled: partway through the call, state a different price or contract length "
+                  "than you said earlier, then try to correct yourself.",
+        "customer": "You are interested and listen carefully to the terms. If the salesperson contradicts what "
+                    "they said earlier about price or contract length, point it out and decline because you no "
+                    "longer know what you would be signing.",
+        "shows": "The salesperson gives contradictory price or contract terms, and the customer points out the "
+                 "inconsistency.",
+    },
+    "no_close": {
+        "label": {"pl": "brak domknięcia sprzedaży", "en": "no close"},
+        "seller": "Present the offer and answer questions, but never ask the customer to buy, sign up or take a "
+                  "next step. End by saying you will send some information.",
+        "customer": "You like the offer and would agree if asked, but you never take the initiative. If the "
+                    "salesperson does not propose signing up or a concrete next step, end the call politely "
+                    "without buying.",
+        "shows": "The customer shows interest, but the salesperson never asks for the sale or proposes a concrete "
+                 "next step.",
+    },
+}
+DEFAULT_MISTAKE_WEIGHTS = {"no_close": 0.32, "objection_dismissed": 0.24, "pushy": 0.18, "no_discovery": 0.14,
+                           "wrong_info": 0.12}
+GOOD_SELLER = "Follow good sales practice."
+
+
+def label(reason: str, lang: str) -> str:
+    """Display label of a reason, customer-side or a seller mistake."""
+
+    return (REASONS.get(reason) or SELLER_MISTAKES[reason])["label"][lang]
+
 # How a call plays out. `plain_*` are ordinary calls; the rest are the near misses a retriever must not fall for.
 PATTERNS = {
     "plain_no_sale": "The customer declines and states the real reason clearly once it comes up.",
@@ -96,11 +160,16 @@ PATTERNS = {
                          "gives the real reason.",
     "two_reasons": "The customer gives two reasons; the main one weighs more and is stated with more emphasis.",
     "callback": "The customer is interested but asks to be called back next month; no decision and no objection.",
+    "seller_fault": "The customer is open to buying; whether they do depends on how the salesperson handles the "
+                    "call.",
 }
-DEFAULT_PATTERN_WEIGHTS = {"plain_no_sale": 0.40, "plain_sale": 0.18, "price_grumble_sale": 0.08,
-                           "polite_brushoff": 0.12, "agent_wrong_guess": 0.08, "two_reasons": 0.08, "callback": 0.06}
+# About 80% of calls fail: 38% on the customer's side, 30% lost by the salesperson, 6% two-reason, 6% wrong guess.
+DEFAULT_PATTERN_WEIGHTS = {"plain_no_sale": 0.28, "seller_fault": 0.30, "polite_brushoff": 0.10,
+                           "agent_wrong_guess": 0.06, "two_reasons": 0.06, "plain_sale": 0.08,
+                           "price_grumble_sale": 0.06, "callback": 0.06}
 OUTCOME = {"plain_no_sale": "no_sale", "polite_brushoff": "no_sale", "agent_wrong_guess": "no_sale",
-           "two_reasons": "no_sale", "plain_sale": "sale", "price_grumble_sale": "sale", "callback": "follow_up"}
+           "two_reasons": "no_sale", "seller_fault": "no_sale", "plain_sale": "sale", "price_grumble_sale": "sale",
+           "callback": "follow_up"}
 
 FIRST = {"pl": ["Anna", "Piotr", "Katarzyna", "Tomasz", "Magdalena", "Michał", "Agnieszka", "Krzysztof", "Joanna",
                 "Paweł", "Ewa", "Marcin", "Monika", "Jakub", "Aleksandra", "Grzegorz", "Natalia", "Adam", "Zofia",
@@ -138,10 +207,10 @@ def _pick(rng: random.Random, weights: dict[str, float]) -> str:
 
 
 class _Deck:
-    """Draws keys in the exact proportions of ``weights`` (shuffled decks of 100), so a planted distribution
+    """Draws keys in the exact proportions of ``weights`` (shuffled decks of 50), so a planted distribution
     holds at any campaign size instead of drifting with sampling noise."""
 
-    def __init__(self, rng: random.Random, weights: dict[str, float], size: int = 100):
+    def __init__(self, rng: random.Random, weights: dict[str, float], size: int = 50):
         self.rng, self.cards = rng, []
         total = sum(weights.values())
         counts = {k: int(size * w / total) for k, w in weights.items()}
@@ -158,7 +227,7 @@ class _Deck:
 
 def plan_campaign(n_calls: int, lang: str = "pl", seed: int = 0, start: str = "2026-09-01", days: int = 60,
                   repeat_share: float = 0.25, reason_weights: dict | None = None,
-                  pattern_weights: dict | None = None) -> list[dict]:
+                  pattern_weights: dict | None = None, mistake_weights: dict | None = None) -> list[dict]:
     """``n_calls`` planned calls, chronological. About ``repeat_share`` of customers get a second call; when the
     first call ended without a sale, the second one may carry a changed reason (a knowledge update)."""
 
@@ -170,19 +239,25 @@ def plan_campaign(n_calls: int, lang: str = "pl", seed: int = 0, start: str = "2
     rng.shuffle(names)
 
     patterns, reasons = _Deck(rng, pattern_weights), _Deck(rng, reason_weights)
+    mistakes = _Deck(rng, mistake_weights or DEFAULT_MISTAKE_WEIGHTS)
     calls, customers = [], []
     while len(calls) < n_calls:
         customer = {"customer_id": f"c_{len(customers):04d}", "name": names[len(customers) % len(names)],
                     "temper": rng.choice(TEMPERS), "product": rng.choice(PRODUCTS)}
         customers.append(customer)
         pattern = patterns.draw()
-        reason = reasons.draw() if OUTCOME[pattern] == "no_sale" else None
+        reason = None
+        if pattern == "seller_fault":
+            reason = mistakes.draw()
+        elif OUTCOME[pattern] == "no_sale":
+            reason = reasons.draw()
         if pattern == "agent_wrong_guess" and reason == "price":
             pattern = "plain_no_sale"  # the customer can't deny price being the problem when it is
         first = _plan_call(rng, customer, pattern, reason_weights, lang, reason=reason)
         first["when"] = t0 + dt.timedelta(days=rng.uniform(0, days * 0.7))
         calls.append(first)
-        if first["outcome"] != "sale" and rng.random() < repeat_share and len(calls) < n_calls:
+        if first["outcome"] != "sale" and first["fault"] != "seller" and rng.random() < repeat_share \
+                and len(calls) < n_calls:
             calls.append(_follow_up(rng, customer, first, reason_weights, lang, t0 + dt.timedelta(days=days)))
 
     calls.sort(key=lambda c: c["when"])
@@ -194,18 +269,29 @@ def plan_campaign(n_calls: int, lang: str = "pl", seed: int = 0, start: str = "2
 
 def _plan_call(rng, customer, pattern, reason_weights, lang, reason=None, prior=None) -> dict:
     outcome = OUTCOME[pattern]
-    primary = secondary = None
-    if outcome == "no_sale":
+    primary = secondary = primary_detail = None
+    if pattern == "seller_fault":
+        primary = reason
+        primary_detail = SELLER_MISTAKES[primary]["shows"]
+    elif outcome == "no_sale":
         primary = reason or _pick(rng, reason_weights)
+        primary_detail = rng.choice(REASONS[primary]["details"])
         if pattern == "two_reasons":
             secondary = _pick(rng, {k: v for k, v in reason_weights.items() if k != primary})
     return {"customer_id": customer["customer_id"], "customer_name": customer["name"], "temper": customer["temper"],
             "product_id": customer["product"]["id"], "product": customer["product"][lang],
             "price": customer["product"]["price"][lang], "term": customer["product"]["term"][lang],
-            "pattern": pattern, "outcome": outcome, "primary_reason": primary, "secondary_reason": secondary,
-            "primary_detail": rng.choice(REASONS[primary]["details"]) if primary else None,
+            "pattern": pattern, "outcome": outcome,
+            "fault": "seller" if pattern == "seller_fault" else "customer" if outcome == "no_sale" else None,
+            "primary_reason": primary, "secondary_reason": secondary, "primary_detail": primary_detail,
             "secondary_detail": rng.choice(REASONS[secondary]["details"]) if secondary else None,
             "prior_call": prior, "lang": lang}
+
+
+def seller_style(call: dict) -> str:
+    """The seller agent's per-call behaviour, sent as the {{seller_style}} dynamic variable."""
+
+    return SELLER_MISTAKES[call["primary_reason"]]["seller"] if call["fault"] == "seller" else GOOD_SELLER
 
 
 def _follow_up(rng, customer, first, reason_weights, lang, latest) -> dict:
@@ -228,7 +314,8 @@ Today you are offering: {{{{product}}}} for {{{{price}}}} ({{{{term}}}}). The cu
 Be natural and polite. Introduce the offer, ask about the customer's needs, handle objections once or twice,
 and if the customer hesitates, ask what is holding them back (you may guess it is the price). Do not push after
 a clear no. Close the call politely when the customer has decided or wants to end it. Keep turns short, as on
-the phone. Write plain spoken text only, without bracketed tags such as [happy] or [slow]."""
+the phone. Write plain spoken text only, without bracketed tags such as [happy] or [slow].
+How you behave in this particular call (this overrides the guidance above): {{{{seller_style}}}}"""
 
 SELLER_FIRST_MESSAGE = {"pl": "Dzień dobry, z tej strony Ola. Czy to pani lub pan {{customer_name}}?",
                         "en": "Hello, this is Ola calling. Am I speaking with {{customer_name}}?"}
@@ -242,7 +329,10 @@ def scenario_prompt(call: dict) -> str:
              f"Temperament: {call['temper']}.",
              f"You are being offered: {call['product']} for {call['price']} ({call['term']}).",
              f"How this call goes: {PATTERNS[call['pattern']]}"]
-    if call["primary_reason"]:
+    if call["fault"] == "seller":
+        lines.append(SELLER_MISTAKES[call["primary_reason"]]["customer"] + " If, despite that, the salesperson "
+                     "handles you well, you may buy.")
+    elif call["primary_reason"]:
         lines.append(f"Your real reason for not buying: {REASONS[call['primary_reason']]['label']['en']} - "
                      f"specifically, {call['primary_detail']}. Express it in your own words with concrete details; "
                      f"do not use the exact category name.")
@@ -265,6 +355,8 @@ def success_conditions(call: dict) -> list[str]:
         return ["The customer agrees to buy or sign up for the offer by the end of the conversation."]
     if call["outcome"] == "follow_up":
         return ["The customer asks to be contacted again later and neither buys nor clearly refuses."]
+    if call["fault"] == "seller":
+        return ["The customer does not buy the offer.", SELLER_MISTAKES[call["primary_reason"]]["shows"]]
     conds = ["The customer does not buy the offer.",
              f"The customer states, in their own words, that a reason for not buying is: "
              f"{REASONS[call['primary_reason']]['label']['en']} ({call['primary_detail']})."]
