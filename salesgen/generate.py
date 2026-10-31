@@ -183,10 +183,26 @@ Q = {
 }
 
 
-def clean(text: str) -> str:
-    """Drops the voice-expression tags ElevenLabs agents put in their text ("[happy]", "[slow]")."""
+EXPRESSION_TAGS = {"happy", "slow", "fast", "strong", "polite", "smile", "smiling", "laughs", "sigh", "excited",
+                   "calm", "warm", "uśmiech", "miło"}
 
-    return re.sub(r"\s{2,}", " ", re.sub(r"\[[a-z][a-z ]{0,20}\]\s*", "", text)).strip()
+
+def clean(text: str) -> str:
+    """Strips what the seller agent should not have said aloud: leaked reasoning ("THOUGHT ...", which can name
+    the planted behaviour), voice-expression tags ("[happy]"), bracketed template notes, and the emphasis
+    brackets it puts around ordinary words ("[świetna] świetna" becomes "świetna")."""
+
+    # The reasoning runs into the spoken reply with no space: "...a final price.Tak, ta kwota".
+    text = re.sub(r"THOUGHT\b.*[.!?\"](?=[A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż])", "", text, flags=re.S)
+
+    def bracket(m: re.Match) -> str:
+        inner, rest = m.group(1).strip(), m.string[m.end():]
+        if inner.lower() in EXPRESSION_TAGS or len(inner.split()) > 3:
+            return ""
+        return "" if rest.lower().startswith(inner.lower()) else inner + " "
+
+    text = re.sub(r"\[([^\[\]]{1,80})\]\s*", bracket, text)
+    return re.sub(r"\s{2,}", " ", re.sub(r"\s+([.,!?])", r"\1", text)).strip()
 
 
 def cmd_build(args) -> None:
